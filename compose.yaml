@@ -1,0 +1,57 @@
+name: sample-a2a-agents
+
+x-agent: &agent
+  build: .
+  image: sample-a2a-agents:local
+  env_file: ["${SAMPLE_ENV_FILE:-.env}"]
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  netutils-agent:
+    <<: *agent
+    command: ["uvicorn", "sample_a2a_agents.netutils_agent.server:app", "--host", "0.0.0.0", "--port", "8120"]
+    ports: ["127.0.0.1:${NETUTILS_HOST_PORT:-8120}:8120"]
+    networks: [caipe]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8120/healthz',timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    profiles: [netutils]
+
+  weather-agent:
+    <<: *agent
+    command: ["uvicorn", "sample_a2a_agents.weather_agent.server:app", "--host", "0.0.0.0", "--port", "8121"]
+    networks: [weather_a2a]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8121/healthz',timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    profiles: [weather]
+
+  weather-agentgateway:
+    image: ghcr.io/agentgateway/agentgateway:v1.1.0
+    command: ["--file", "/etc/agentgateway/config.yaml"]
+    ports: ["127.0.0.1:${WEATHER_GATEWAY_HOST_PORT:-4010}:4000"]
+    volumes:
+      - ${WEATHER_GATEWAY_CONFIG:-./deploy/agentgateway/config.a2a-weather.yaml}:/etc/agentgateway/config.yaml:ro
+    networks: [caipe, weather_a2a]
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
+    depends_on:
+      weather-agent:
+        condition: service_healthy
+    profiles: [weather]
+
+networks:
+  caipe:
+    external: true
+    name: ${CAIPE_NETWORK:-caipe_default}
+  # Only Weather and its JWT gateway can resolve the private backend.
+  weather_a2a:
+    driver: bridge
