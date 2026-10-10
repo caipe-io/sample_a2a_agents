@@ -4,7 +4,7 @@ Standalone examples for [CAIPE remote A2A tools](https://github.com/caipe-io/ai-
 
 | Agent | Tools | Access |
 | --- | --- | --- |
-| Netutils | Existing Netutils MCP server | Direct A2A endpoint |
+| Netutils | Existing Netutils MCP server | Direct A2A endpoint validates the user’s Keycloak JWT |
 | Weather | Open-Meteo current weather and three-day forecasts | AgentGateway validates the user's Keycloak JWT |
 
 Both advertise streaming and emit incremental text artifacts. Blocking clients receive the completed result. The shared LangGraph adapter, tests, Docker image, and gateway configuration live here; the platform repository contains the remote-agent registry, client, authentication selection, and UI.
@@ -25,6 +25,7 @@ Both advertise streaming and emit incremental text artifacts. Blocking clients r
    - Set `CAIPE_NETWORK` to the running platform's Docker network (for example `caipe_default`).
    - Set `OPENAI_MODEL_NAME` and `OPENAI_API_KEY`. For LiteLLM, set `OPENAI_BASE_URL` to its OpenAI-compatible URL ending in `/v1`.
    - Set `NETUTILS_MCP_URL` if your MCP service uses a different name or port.
+   - Set the Netutils issuer, audience and JWKS URL to match Keycloak.
    - Configure different loopback host ports with `NETUTILS_HOST_PORT` / `WEATHER_GATEWAY_HOST_PORT` if needed.
 4. Review `deploy/agentgateway/config.a2a-weather.yaml`:
    - `issuer` must exactly match the browser-facing Keycloak issuer in the user's JWT, including scheme, port and realm.
@@ -49,6 +50,7 @@ In **Hello World → Advanced → Remote A2A Agents**, add:
 | Netutils Agent | `http://netutils-agent:8120/` | User JWT, `Authorization` | 120 seconds |
 | Weather Agent | `http://weather-agentgateway:4000/` | User JWT, `Authorization` | 120 seconds |
 
+- In the DA deployment, trust the exact local origins with `REMOTE_A2A_ALLOWED_HTTP_ORIGINS=["http://netutils-agent:8120","http://weather-agentgateway:4000"]`. Use HTTPS outside a trusted local network.
 - Discover each Agent Card, **Add and select**, then **Save Changes** on the parent agent.
 - Enable **Stream responses** per entry to see remote text in the running tool panel.
 - Try: “Use Weather Agent for the current weather and forecast in my city, and Netutils Agent to resolve example.com.” Include a city.
@@ -69,7 +71,7 @@ flowchart LR
 - Weather has no published host port and joins only its private backend network. Its Agent Card advertises the gateway URL.
 - AgentGateway consumes `Authorization` after validation. This sample provides JWT authentication; it does not configure OpenFGA authorization.
 - AgentGateway v1.1.0 native A2A card rewriting expects the legacy `url` field. This configuration proxies HTTP unchanged under the JWT policy, preserving A2A 1.0 `supportedInterfaces` and SSE streaming.
-- Netutils demonstrates direct connectivity. Its endpoint does not validate the forwarded JWT; use a gateway for protected deployments.
+- Netutils demonstrates direct connectivity and validates the JWT signature, issuer, audience and expiry using Keycloak JWKS. Configure `NETUTILS_OIDC_ISSUER`, `NETUTILS_OIDC_AUDIENCE` and `NETUTILS_JWKS_URL`; missing configuration fails closed. Its host port is bound to loopback.
 
 ## Run without Docker
 
@@ -91,7 +93,7 @@ SAMPLE_ENV_FILE=.env.example docker compose --env-file .env.example --profile ne
 docker build -t sample-a2a-agents:local .
 ```
 
-Tests use injected fake agents and mocked provider responses, without model keys or live weather requests. They cover SDK discovery, blocking and streaming calls, progressive artifacts, weather errors, credential isolation from the provider, and the gateway/private-network configuration.
+Tests use injected fake agents and mocked provider responses, without model keys or live weather requests. They cover signed JWT enforcement, readiness after initialization, failed-task events, SDK discovery, blocking and streaming calls, progressive artifacts, weather errors, credential isolation from the provider, and the gateway/private-network configuration.
 
 ## Contributing
 

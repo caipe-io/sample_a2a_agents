@@ -9,6 +9,7 @@ dependencies = [
     "fastapi==0.141.1",
     "uvicorn[standard]==0.52.4",
     "httpx==0.28.1",
+    "pyjwt[crypto]==2.15.1",
     "langchain-core==1.6.3",
     "langchain-openai==1.6.2",
     "langchain-mcp-adapters==0.3.2",

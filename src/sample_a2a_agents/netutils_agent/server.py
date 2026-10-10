@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.prebuilt import create_react_agent
 
+from sample_a2a_agents.auth import JwtAuthMiddleware
 from sample_a2a_agents.llm import get_llm
 from sample_a2a_agents.server import create_example_app
 
@@ -29,7 +30,7 @@ async def _build_agent() -> Any:
 
 
 def create_app(agent: Any | None = None, agent_url: str | None = None) -> FastAPI:
-    return create_example_app(
+    app = create_example_app(
         name="Netutils Agent",
         description="Network diagnostics, DNS lookup, and network utility tools.",
         skill=AgentSkill(
@@ -43,6 +44,9 @@ def create_app(agent: Any | None = None, agent_url: str | None = None) -> FastAP
         build_agent=_build_agent,
         agent=agent,
     )
+
+    app.add_middleware(JwtAuthMiddleware)
+    return app
 
 
 app = create_app()

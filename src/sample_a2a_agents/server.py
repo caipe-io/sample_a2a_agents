@@ -25,11 +25,23 @@ from a2a.types import (
     TaskState,
     TaskStatus,
 )
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from langchain_core.messages import AIMessageChunk
 
 logger = logging.getLogger(__name__)
+
+
+def _text_content(content: Any) -> str:
+    """Preserve string and text-block content identically for streaming and complete responses."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(_text_content(part) for part in content)
+    if isinstance(content, dict):
+        text = content.get("text")
+        return text if isinstance(text, str) else ""
+    return ""
 
 
 class LangGraphExecutor(AgentExecutor):
@@ -39,56 +51,51 @@ class LangGraphExecutor(AgentExecutor):
         self._agent = agent
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-        if hasattr(self._agent, "astream"):
-            if not context.task_id or not context.context_id:
-                raise ValueError("A2A task identifiers are required")
-            updater = TaskUpdater(event_queue, context.task_id, context.context_id)
-            await event_queue.enqueue_event(
-                Task(
-                    id=context.task_id,
-                    context_id=context.context_id,
-                    status=TaskStatus(state=TaskState.TASK_STATE_SUBMITTED),
-                )
-            )
-            await updater.start_work()
-            artifact_id = str(uuid.uuid4())
-            emitted = False
-            async for chunk, _metadata in self._agent.astream(
-                {"messages": [{"role": "user", "content": context.get_user_input()}]},
-                stream_mode="messages",
-            ):
-                # Tool arguments and tool results stay private to the remote agent.
-                if not isinstance(chunk, AIMessageChunk) or chunk.tool_call_chunks:
-                    continue
-                content = chunk.content
-                if isinstance(content, list):
-                    content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+        if not context.task_id or not context.context_id:
+            raise ValueError("A2A task identifiers are required")
+        updater = TaskUpdater(event_queue, context.task_id, context.context_id)
+        await event_queue.enqueue_event(
+            Task(id=context.task_id, context_id=context.context_id,
+                 status=TaskStatus(state=TaskState.TASK_STATE_SUBMITTED))
+        )
+        await updater.start_work()
+        artifact_id = str(uuid.uuid4())
+        emitted = False
+        try:
+            inputs = {"messages": [{"role": "user", "content": context.get_user_input()}]}
+            if hasattr(self._agent, "astream"):
+                async for chunk, _metadata in self._agent.astream(inputs, stream_mode="messages"):
+                    # Tool arguments and tool results stay private to the remote agent.
+                    if not isinstance(chunk, AIMessageChunk) or chunk.tool_call_chunks:
+                        continue
+                    content = _text_content(chunk.content)
+                    if content:
+                        await updater.add_artifact([Part(text=content)], artifact_id=artifact_id, append=emitted)
+                        emitted = True
+            else:
+                result = await self._agent.ainvoke(inputs)
+                messages = result.get("messages", [])
+                content = _text_content(messages[-1].content) if messages else ""
                 if content:
-                    await updater.add_artifact([Part(text=str(content))], artifact_id=artifact_id, append=emitted)
+                    await updater.add_artifact([Part(text=content)], artifact_id=artifact_id)
                     emitted = True
             await updater.add_artifact(
                 [Part(text="" if emitted else "Agent returned no response.")],
-                artifact_id=artifact_id,
-                append=emitted,
-                last_chunk=True,
+                artifact_id=artifact_id, append=emitted, last_chunk=True,
             )
             await updater.complete()
-            return
-        result = await self._agent.ainvoke({"messages": [{"role": "user", "content": context.get_user_input()}]})
-        messages = result.get("messages", [])
-        content = messages[-1].content if messages else "Agent returned no response."
-        if isinstance(content, list):
-            content = "\n".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
-        await event_queue.enqueue_event(
-            Message(message_id=str(uuid.uuid4()), role=Role.ROLE_AGENT, parts=[Part(text=str(content))])
-        )
+        except Exception:
+            logger.exception("A2A execution failed for task %s in context %s", context.task_id, context.context_id)
+            await updater.failed(Message(message_id=str(uuid.uuid4()), role=Role.ROLE_AGENT,
+                                         parts=[Part(text="Agent execution failed. Check the remote agent logs.")]))
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         logger.info("Ignoring cancellation for example A2A task %s", context.task_id)
 
 
-async def _health() -> JSONResponse:
-    return JSONResponse({"status": "healthy"})
+async def _health(request: Request) -> JSONResponse:
+    ready = getattr(request.app.state, "ready", False)
+    return JSONResponse({"status": "healthy" if ready else "starting"}, status_code=200 if ready else 503)
 
 
 def create_example_app(
@@ -124,7 +131,11 @@ def create_example_app(
         app.state.request_handler = handler
         app.router.routes.extend(create_agent_card_routes(card))
         app.router.routes.extend(create_jsonrpc_routes(handler, rpc_url="/"))
-        yield
+        app.state.ready = True
+        try:
+            yield
+        finally:
+            app.state.ready = False
 
     app = FastAPI(lifespan=lifespan)
     app.add_api_route("/healthz", _health, methods=["GET"])

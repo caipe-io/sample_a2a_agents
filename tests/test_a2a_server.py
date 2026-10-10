@@ -5,6 +5,7 @@ import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -15,6 +16,7 @@ from fastapi import FastAPI
 from langchain_core.messages import AIMessageChunk
 
 from sample_a2a_agents.netutils_agent.server import create_app as netutils_app
+from sample_a2a_agents.server import _text_content
 from sample_a2a_agents.weather_agent.server import create_app as weather_app
 
 
@@ -43,6 +45,8 @@ async def _server(app_factory: Any, agent: Any) -> AsyncIterator[str]:
         sock.setblocking(False)
         endpoint = f"http://127.0.0.1:{sock.getsockname()[1]}/"
         app = app_factory(agent=agent, agent_url=endpoint)
+        auth_patch = patch("sample_a2a_agents.auth.JwtAuthMiddleware._verify", AsyncMock())
+        auth_patch.start()
         server = uvicorn.Server(uvicorn.Config(app, log_level="critical", lifespan="on"))
         task = asyncio.create_task(server.serve(sockets=[sock]))
         try:
@@ -54,6 +58,7 @@ async def _server(app_factory: Any, agent: Any) -> AsyncIterator[str]:
                     await asyncio.sleep(0.01)
             yield endpoint
         finally:
+            auth_patch.stop()
             server.should_exit = True
             await asyncio.wait_for(task, timeout=5)
 
@@ -63,8 +68,8 @@ async def test_health_needs_no_query_parameters(app_factory: Any) -> None:
     app: FastAPI = app_factory(agent=_FakeAgent())
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://example.test") as client:
         response = await client.get("/healthz")
-    assert response.status_code == 200
-    assert response.json() == {"status": "healthy"}
+    assert response.status_code == 503
+    assert response.json() == {"status": "starting"}
 
 
 @pytest.mark.parametrize("app_factory", [netutils_app, weather_app])
@@ -72,7 +77,8 @@ async def test_health_needs_no_query_parameters(app_factory: Any) -> None:
 async def test_sdk_discovery_and_incremental_response(app_factory: Any, streaming: bool) -> None:
     agent = _FakeAgent()
     async with _server(app_factory, agent) as endpoint:
-        async with httpx.AsyncClient(timeout=10) as http_client:
+        async with httpx.AsyncClient(timeout=10, headers={"Authorization": "Bearer protocol-test-token"}) as http_client:
+            assert (await http_client.get(endpoint + "healthz")).json() == {"status": "healthy"}
             card = (await http_client.get(endpoint + ".well-known/agent-card.json")).json()
             assert card["capabilities"]["streaming"] is True
             assert card["supportedInterfaces"][0]["url"] == endpoint
@@ -102,3 +108,31 @@ async def test_sdk_discovery_and_incremental_response(app_factory: Any, streamin
         assert "".join(chunks) == "Example response"
     else:
         assert response_text == "Example response"
+
+
+class _FailingAgent:
+    async def ainvoke(self, inputs: dict[str, Any]) -> Any:
+        raise RuntimeError("internal failure details")
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_agent_failure_returns_terminal_failed_task(streaming: bool) -> None:
+    async with _server(weather_app, _FailingAgent()) as endpoint:
+        async with httpx.AsyncClient(timeout=10, headers={"Authorization": "Bearer protocol-test-token"}) as http_client:
+            client = await ClientFactory(ClientConfig(streaming=streaming, httpx_client=http_client)).create_from_url(endpoint)
+            states = []
+            try:
+                request = SendMessageRequest(message=Message(message_id="test-error", role=Role.ROLE_USER, parts=[Part(text="hello")]))
+                async for response in client.send_message(request):
+                    if response.HasField("status_update"):
+                        states.append(response.status_update.status.state)
+                        assert "internal failure details" not in str(response)
+                    if response.HasField("task"):
+                        states.append(response.task.status.state)
+            finally:
+                await client.close()
+    assert states[-1] == TaskState.TASK_STATE_FAILED
+
+
+def test_mixed_text_blocks_preserve_content() -> None:
+    assert _text_content(["First ", {"type": "text", "text": "second\n"}, None, {"type": "image"}, "third"]) == "First second\nthird"

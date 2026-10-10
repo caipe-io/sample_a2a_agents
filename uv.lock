@@ -1181,6 +1181,7 @@ dependencies = [
     { name = "langchain-mcp-adapters" },
     { name = "langchain-openai" },
     { name = "langgraph" },
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1201,6 +1202,7 @@ requires-dist = [
     { name = "langchain-mcp-adapters", specifier = "==0.3.2" },
     { name = "langchain-openai", specifier = "==1.6.2" },
     { name = "langgraph", specifier = "==1.2.12" },
+    { name = "pyjwt", extras = ["crypto"], specifier = "==2.15.1" },
     { name = "uvicorn", extras = ["standard"], specifier = "==0.52.4" },
 ]
 
